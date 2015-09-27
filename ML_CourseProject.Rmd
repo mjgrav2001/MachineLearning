@@ -1,0 +1,312 @@
+
+# Course Project in the 'Practical Machine Learning' Class of the Coursera 'Data Science Specialization' (Johns Hopkins University)
+
+---
+title: "ML_CourseProject.Rmd"
+author: "Mark A. Jack"
+date: "September 26, 2015"
+output: pdf_document
+---
+
+## Executive Summary
+
+The associated R script named 'run_analysis_ML.R' provides the analysis for the course project in the 'Practical Machine Learning' course for the Coursera course series 'Data Science' by Johns Hopkins University. The data linked to the course website can be found here:
+
+https://github.com/mjgrav2001/MachineLearning
+
+The analysis refers to following publication:
+
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H.:
+Wearable Computing: Accelerometers' Data Classification of Body Postures 
+and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. 
+Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science.,
+pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. 
+DOI: 10.1007/978-3-642-34459-6_6. 
+
+Additional information is available online at: 
+http://groupware.les.inf.puc-rio.br/har#ixzz3lqZ2yZHW
+
+Following information is provided about the available data by the authors at the 
+website listed above:
+
+"... Six young health participants were asked to perform one set of 10 
+repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: 
+exactly according to the specification (Class A), throwing the elbows to the front 
+(Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only 
+halfway (Class D) and throwing the hips to the front (Class E). ..."
+
+The data available from the project website (pml-training.csv, pml-testing.csv) is split into training, validation and test sets to predict the outcome variable 'classe' characterizing the 5 individual physical activities by the 6 participants from a number of predictor variables. The number of predictor variables is reduced in two stages by first removing for model fits unncecessary integrated kinematic variables and time stamping variables and then secondly by dropping highly correlated variables using a selected cut-off criterium. A Principle Components Analysis (PCA) does not demonstrate any further opportunities to reduce the number of predictors. Three different individual model fits are then conducted (rf, gbm, and svm) with the remaining, filtered 33 predictor variables. Each model fit shows a similarly high level of prediction accuracy above 90% in each case. The validated model fits then create predictions for the 20 test cases that were provided which are then further consolidated in majority votes in a final step where necessary. 100% agreement of the final predictions with the actual results is achieved for all 20 test cases.
+
+## Environment
+
+```{r, include=FALSE, cache=FALSE}
+library(plyr)
+library(dplyr)
+library(Hmisc)
+library(lubridate)
+library(lattice)
+library(ggplot2)
+library(caret)
+library(AppliedPredictiveModeling)
+library(ElemStatLearn)
+library(stats)
+library(pgmm)
+library(rpart)
+library(gbm)
+library(mda)
+library(forecast)
+library(e1071)
+library(randomForest)
+library(mgcv)
+library(nlme)
+library(glmnet)
+library(lars)
+library(genlasso)
+library(elasticnet)
+```
+
+## Data Processing and Reduction of Predictors
+
+The training and test data files are uploaded, pml-training.csv and pml-testing.csv. A training and validation data set are created from the file pml-training.csv with a 60% versus 40% split into training and validation data sets. All columns with missing data are removed where missing values have initially been characterized by character variables "NA", "#DIV/0!", "", or " ".
+```{r, echo=TRUE}
+alldata <- read.csv("/Users/markjack/data/pml-training.csv", na.strings = c("NA", "#DIV/0!", "", " "), stringsAsFactors=F)
+testing <- read.csv("/Users/markjack/data/pml-testing.csv", na.strings = c("NA", "#DIV/0!", "", " "), stringsAsFactors=F)
+inTrain = createDataPartition(alldata$classe, p = 0.6)[[1]]
+training = alldata[ inTrain,]
+validation = alldata[-inTrain,]
+dim(training)
+dim(validation)
+dim(testing)
+training <- training[,colSums(is.na(training)) == 0]
+validation <- validation[,colSums(is.na(validation)) == 0]
+testing <- testing[,colSums(is.na(testing)) == 0]
+```
+
+In a second step, all descriptors that describe time stamp information or integrated kinematic variables (11 in total). Thus, the number of predictors is reduced from 60 to 49. Time stamp information and integrated variables would add little to the predictive power of the individual kinematic variable components.
+```{r, echo=TRUE}
+myvars <- names(training) %in% c("X", "user_name", "cvtd_timestamp", "new_window", 
+                                 "raw_timestamp_part_1", "raw_timestamp_part_2", "num_window", 
+                                 "total_accel_belt", "total_accel_arm", "total_accel_dumbbell", 
+                                 "total_accel_forearm") 
+training <- training[!myvars]
+validation <- validation[!myvars]
+testing <- testing[!myvars]
+all.equal(names(training),names(validation))
+all.equal(names(training),names(testing))
+```
+
+The outcome variable 'classe' is transformed into a factor variable and second data sets 'training0', 'validation0', 'testing0' are created where the outcome variable 'classe' was removed for later model fits to test data set:
+```{r, echo=TRUE}
+training$classe <- factor(training$classe) 
+validation$classe <- factor(validation$classe) 
+testing$problem_id <- factor(testing$problem_id)
+training0 <- training[c(-49)]
+validation0 <- validation[c(-49)]
+testing0 <- testing[c(-49)]
+```
+
+All highly correlated descriptors are removed, i.e. descriptors that are more than 75% correlated in all data sets are removed to prevent overfitting in the following model fits and accelerate model fits with the reduced number of varables. The total number of predictors can be significantly reduced from initially more than 60 to 33 with this cutoff procedure.
+```{r, echo=TRUE}
+descrCor <- cor(training0)
+summary(descrCor[upper.tri(descrCor)])
+highlyCorDescr <- findCorrelation(descrCor, cutoff = .75)
+training_filt <- training0[,-highlyCorDescr]
+descrCor2 <- cor(training_filt)
+summary(descrCor2[upper.tri(descrCor2)])
+validation_filt <- validation0[,-highlyCorDescr]
+testing_filt <- testing0[,-highlyCorDescr]
+dim(training0)
+dim(training_filt)
+dim(validation_filt)
+dim(testing_filt)
+str(training_filt)
+```
+
+The number of selected variables in the training set cannot be further reduced based on close to zero variance, i.e. none of the remaining 33 variables have near zero variance:
+```{r, echo=TRUE}
+nzv <- nearZeroVar(training_filt, saveMetrics = TRUE)
+nzv
+```
+
+## Principal Components Analysis (PCA)
+
+We start with a Principal Components Analysis (PCA) of the training data to get an idea whether it is useful to reduce the relevant number of predictor variables for later model fits. The analysis shows that an inclusion of minimally 25 PCA components is necessary to reach roughly 96% accuracy for the predictor model with 'classe' as the outcome variable. Because little gain can be seen in variable reduction from the PCA analysis, the decision is made to perform all model fits with the complete subset of 33 predictors and to not omit any further variables.
+```{r, eval = FALSE}
+set.seed(3433)
+preProc <- preProcess(training_filt, method = "pca", pcaComp = 25)
+trainPC <- predict(preProc, training_filt)
+summary(prcomp(trainPC))
+modelFit <- train(factor(training$classe) ~ ., method = "rf", data = trainPC)
+testPC <- predict(preProc, validation_filt)
+confusionMatrix(predict(modelFit, testPC), factor(validation$classe))
+```
+
+In comparsison the in-sample error can be derived like this:
+```{r, eval=FALSE}
+confusionMatrix(predict(modelFit, trainPC), factor(training$classe))
+```
+
+## Model Fits
+
+Three model fits have been selected with the remaining 33 predictor variables including a 'random forest (rf)', a 'generalized boosted regression model (gbm)' and a 'support vector machine (svm)' model that show high levels (99%, 94% and 93%, respectively) of accuracy individually on the created 'validation data set'.
+```{r, echo=TRUE}
+set.seed(32323)
+fitControl <- trainControl(method = "none")
+tgrid     <- expand.grid(mtry=c(6)) 
+
+modFit1 <- train(training$classe ~ ., method="rf", trControl = fitControl, tuneGrid = tgrid, data=training_filt, prox=TRUE)
+pred1 <- predict(modFit1, newdata = validation_filt)
+confusionMatrix(factor(pred1), factor(validation$classe))
+```
+
+```{r, echo=TRUE}
+modFit2 <- train(training$classe ~ ., method="gbm", data=training_filt, verbose=FALSE)
+pred2 <- predict(modFit2, newdata = validation_filt)
+confusionMatrix(factor(pred2), factor(validation$classe))
+```
+
+```{r, echo=TRUE}
+modFit3 <- svm(formula = training$classe ~ ., data=training_filt)
+pred3 <- predict(modFit3, newdata = validation_filt)
+confusionMatrix(factor(pred3), factor(validation$classe))
+```
+
+A combined model fit with 'random forests' as method by combining the predictive powers of all three individual models promises a further increase in prediction accuracy to 99.01%: 
+```{r, echo=TRUE}
+pred_data123 <- data.frame(pred1, pred2, pred3)
+combo_modFit123 <- train(factor(validation$classe) ~ ., method="rf", trControl = fitControl, 
+                         tuneGrid = tgrid, data = pred_data123)
+combo_pred123 <- predict(combo_modFit123, newdata = validation_filt)
+confusionMatrix(combo_pred123, factor(validation$classe))
+```
+
+The predictions of all three models on on the test data with 20 different test cases are now combined and a majority vote is conducted in case of differing predictions with results for the 20 test cases collected in a vector named 'answers'. 20 indivdual text files are created each containing the letter prediction 'A', 'B', 'C', "D' or 'C' for the 5 possible outcomes for the 'classe' variable. 100% agreement with the actual correct answers is achieved for the 20 test cases with the above data manipulation and variable reduction selection process.  
+```{r, echo=TRUE}
+answers1 <- predict(modFit1, newdata = testing_filt)
+answers2 <- predict(modFit2, newdata = testing_filt)
+answers3 <- predict(modFit3, newdata = testing_filt)
+answers1
+answers2
+answers3
+```
+
+The predictions of the 3 independent model fits for the 20 test cases provided in the filtered test set 'testing_filt' are now simply combined in form of a majority vote, i.e. in case of differing predictions of the 3 model fit vectors 'answers1', 'answers2' and 'answers3' that prediction is picked in which at least two of the vectors have an agreeing result. 
+```{r, echo=TRUE}
+answers <- answers2
+for (i in 1:20) {
+  if ((answers3[i] == answers2[i]) || (answers3[i] == answers1[i])) {
+    answers[i] = answers1[i]
+  }  
+}
+answers 
+```
+
+All 20 thus obtained predictions perfectly agree with the actual results for the 'classe' variable in the test set after submitting the results as 20 text files, each containing the prediction of one test case. The code to generate the 20 text files is shown below.
+```{r, echo=TRUE}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("/Users/markjack/data/problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,
+                        row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(answers)
+```
+
+## Appendix:
+
+### Plots:
+
+Below a series of box plots and scatter plots illustrate a subset of variables with their average values and variability and the relationship of 5 particular predictor variables in 2 scatter plots. 5 figures are included (3 box plots and 2 scatter plots) to summarize the statistical behavior of the most relevant variables.   
+
+- Figure 1: A box plot is shown of 9 of the 33 selected variables with the largest amount of variance. average values and their standard deviations are illustrated. The kinematic variables shown are roll_arm, pitch_arm, yaw_arm, roll_dumbbell, pitch_dumbbell, yaw_dumbbell, roll_forearm, pitch_forearm, and yaw_forearm. The two predictors with the largeest variability among their central values are yaw_dumbbell and roll_forearm.
+
+- Figure 2: In a second box plot acceleration variables accel_belt_y, accel_arm_z, accel_dumbbell_y, accel_forearm_x, and accel_forearm_z are depicted with the kinematic variable yaw_belt. Little variation is vsible among average values with the two most variable predictors being accel_belt_y, accel_dumbbell_y, and accel_forearm_x.
+
+- Figures 3: In this box  plot, mong the magnetic kinematic variables with little correlation probably the predictor magnet_arm_x shows the largest variation across the 5 'classe' values A, B, C, D, and E. 
+
+- Figure 4: This is the first of two scatter plots where the relationship of the two strongly varying predictors roll_dumbbell and yaw_dumbbell is depicted together with the third variable yaw_belt. Predictor yaw_belt essentially has the characeristic of a factor variable where the data is aligned clearly along 6 discrete values. For the 4th and 5th largest value a predominance of 'classe' value E or D can be seen, respectively. Just comparing variables roll_dumbbell and yaw_dumbbell alone four very clear linear boundary conditions can be observed - all values for the two variables are contained in a diamond-shaped box with most of the day strongly constrained to those linear boundaries.
+
+- Figure 5: In this last figure and second scatter plot, similarly as in Figure 4, predictors are shown together with predictor yaw_belt and again the factor variable behavior of yaw_belt can be seen while 
+variables roll_forearm and yaw_forearm show linear relationships in certain regions of the parameter spacewhich would allow to separate 'classe' values A and D and to a certain degree A, D, C and B. 
+
+#### Figure 1:
+
+```{r, echo=FALSE}
+transparentTheme(trans = .6)
+featurePlot(x = training_filt[, c("roll_arm", "pitch_arm", "yaw_arm", 
+                                  "roll_dumbbell", "pitch_dumbbell", "yaw_dumbbell",
+                                  "roll_forearm", "pitch_forearm", "yaw_forearm")],
+            y = factor(training$classe),
+            plot = "box",
+            ## Pass in options to bwplot() 
+            scales = list(y = list(relation="free"),
+                          x = list(rot = 90)),
+            layout = c(3, 3),
+            auto.key = list(columns = 3))
+#dev.copy(png, file = "/Users/markjack/data/boxplot-ML1.png")
+#dev.off()
+```
+
+#### Figure 2:
+
+```{r, echo=FALSE}
+transparentTheme(trans = .6)
+featurePlot(x = training_filt[, c("accel_belt_y", "accel_arm_z", "accel_dumbbell_y",
+                                  "accel_forearm_x", "accel_forearm_z", "yaw_belt")],
+            y = factor(training$classe),
+            plot = "box",
+            ## Pass in options to bwplot() 
+            scales = list(y = list(relation="free"),
+                          x = list(rot = 90)),
+            layout = c(3, 2),
+            auto.key = list(columns = 3))
+#dev.copy(png, file = "/Users/markjack/data/boxplot-ML2.png")
+#dev.off()
+```
+
+#### Figure 3:
+
+```{r, echo=FALSE}
+transparentTheme(trans = .6)
+featurePlot(x = training_filt[, c("magnet_belt_x", "magnet_belt_y",
+                                  "magnet_dumbbell_z",
+                                  "magnet_forearm_x", "magnet_forearm_z",
+                                  "magnet_arm_x")],
+            y = factor(training$classe),
+            plot = "box",
+            ## Pass in options to bwplot() 
+            scales = list(y = list(relation="free"),
+                          x = list(rot = 90)),
+            layout = c(3, 2),
+            auto.key = list(columns = 3))
+#dev.copy(png, file = "/Users/markjack/data/boxplot-ML3.png")
+#dev.off()
+```
+
+#### Figure 4:
+
+```{r, echo=FALSE}
+transparentTheme(trans = .6)
+featurePlot(x = training_filt[, c("yaw_belt", "roll_dumbbell", "yaw_dumbbell")],
+            y = factor(training$classe),
+            plot = "pairs",
+            ## Add a key at the top
+            auto.key = list(columns = 3))
+#dev.copy(png, file = "/Users/markjack/data/scatterplot-ML1.png")
+#dev.off()
+```
+
+#### Figure 5:
+
+```{r, echo=FALSE}
+transparentTheme(trans = .6)
+featurePlot(x = training_filt[, c("yaw_belt", "roll_forearm", "yaw_forearm")],
+            y = factor(training$classe),
+            plot = "pairs",
+            ## Add a key at the top
+            auto.key = list(columns = 3))
+#dev.copy(png, file = "/Users/markjack/data/scatterplot-ML2.png")
+#dev.off()
+```
